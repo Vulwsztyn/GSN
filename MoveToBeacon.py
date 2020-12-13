@@ -13,34 +13,34 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 lr = 0.0001
 FUNCTIONS = actions.FUNCTIONS
 _PLAYER_NEUTRAL = features.PlayerRelative.NEUTRAL
+screen_size = 32
 
 class Actor(nn.Module):
-    def __init__(self, state_size, action_size):
+    def __init__(self):
         super(Actor, self).__init__()
-        self.state_size = state_size
-        self.action_size = action_size
-        self.linear1 = nn.Linear(self.state_size, 128)
-        self.linear2 = nn.Linear(128, 256)
-        self.linear3 = nn.Linear(256, self.action_size)
+        self.state_size = screen_size*screen_size
+        self.action_size = 2
+        self.linear1 = nn.Linear(self.state_size, self.state_size*2)
+        self.linear2 = nn.Linear(self.state_size*2, self.state_size*4)
+        self.linear3 = nn.Linear(self.state_size*4, self.action_size)
 
-    def output(self, state):
+    def forward(self, state):
         output = F.relu(self.linear1(state))
         output = F.relu(self.linear2(output))
-        output = self.linear3(output)
-        distribution = Categorical(F.softmax(output, dim=-1))
-        return distribution
+        output = F.sigmoid(self.linear3(output))
+        return output
 
 
 class Critic(nn.Module):
-    def __init__(self, state_size, action_size):
+    def __init__(self):
         super(Critic, self).__init__()
-        self.state_size = state_size
-        self.action_size = action_size
-        self.linear1 = nn.Linear(self.state_size, 128)
-        self.linear2 = nn.Linear(128, 256)
-        self.linear3 = nn.Linear(256, 1)
+        self.state_size = screen_size*screen_size
+        self.action_size = 2
+        self.linear1 = nn.Linear(self.state_size, self.state_size*2)
+        self.linear2 = nn.Linear(self.state_size*2, self.state_size*4)
+        self.linear3 = nn.Linear(self.state_size*4, self.action_size)
 
-    def output(self, state):
+    def forward(self, state):
         output = F.relu(self.linear1(state))
         output = F.relu(self.linear2(output))
         value = self.linear3(output)
@@ -51,8 +51,8 @@ class Critic(nn.Module):
 class MoveToBeacon(base_agent.BaseAgent):
     def __init__(self):
         super().__init__()
-        self.actor = Actor
-        self.critic = Critic
+        self.actor = Actor()
+        self.critic = Critic()
 
     def _xy_locs(self, mask):
         """Mask should be a set of bools from comparison with a feature layer."""
@@ -76,6 +76,13 @@ class MoveToBeacon(base_agent.BaseAgent):
     def learn(self, state, reward):
         return
 
+    def predict(self, state):
+        processed_state = torch.FloatTensor(np.array(state.player_relative).flatten()).to(device)
+        dist = self.actor(processed_state).cpu().detach().numpy().tolist()
+        print(dist)
+        dist = np.floor(np.multiply(dist, 32))
+        return dist
+
 
     def step(self, obs):
         super(MoveToBeacon, self).step(obs)
@@ -83,11 +90,13 @@ class MoveToBeacon(base_agent.BaseAgent):
         state = obs.observation.feature_screen
         reward = obs.reward
         self.learn(state, reward)
+        coords_to_go_to = self.predict(state)
 
-        self.do_stuff_with_reward(obs.reward)
         if FUNCTIONS.Move_screen.id not in obs.observation.available_actions:
             return FUNCTIONS.select_army(False)
-        coords_to_go_to = self.decide_coords(obs.observation.feature_screen.player_relative)
+
+        # coords_to_go_to = self.decide_coords(obs.observation.feature_screen.player_relative)
+
         return FUNCTIONS.Move_screen(False, coords_to_go_to)
 
 
@@ -98,8 +107,8 @@ if __name__ == "__main__":
               map_name="MoveToBeacon",
               players=[sc2_env.Agent(sc2_env.Race.terran)],
               agent_interface_format=sc2_env.parse_agent_interface_format(
-                  feature_screen=32,
-                  feature_minimap=32,
+                  feature_screen=screen_size,
+                  feature_minimap=screen_size,
                   action_space=None,
                   use_feature_units=False,
                   use_raw_units=False),
