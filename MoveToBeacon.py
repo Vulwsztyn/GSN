@@ -6,23 +6,25 @@ from torch.distributions import Categorical
 from pysc2.agents import base_agent
 from pysc2.lib import actions, features
 import numpy as np
-
+import sys
+from absl import flags
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-lr = 0.0001
+lr = 0.01
 FUNCTIONS = actions.FUNCTIONS
 _PLAYER_NEUTRAL = features.PlayerRelative.NEUTRAL
 screen_size = 32
 
+
 class Actor(nn.Module):
     def __init__(self):
         super(Actor, self).__init__()
-        self.state_size = screen_size*screen_size
+        self.state_size = screen_size * screen_size
         self.action_size = 2
-        self.linear1 = nn.Linear(self.state_size, self.state_size*2)
-        self.linear2 = nn.Linear(self.state_size*2, self.state_size*4)
-        self.linear3 = nn.Linear(self.state_size*4, self.action_size)
+        self.linear1 = nn.Linear(self.state_size, self.state_size * 2)
+        self.linear2 = nn.Linear(self.state_size * 2, self.state_size * 4)
+        self.linear3 = nn.Linear(self.state_size * 4, self.action_size)
 
     def forward(self, state):
         output = F.relu(self.linear1(state))
@@ -34,11 +36,11 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self):
         super(Critic, self).__init__()
-        self.state_size = screen_size*screen_size
+        self.state_size = screen_size * screen_size
         self.action_size = 2
-        self.linear1 = nn.Linear(self.state_size, self.state_size*2)
-        self.linear2 = nn.Linear(self.state_size*2, self.state_size*4)
-        self.linear3 = nn.Linear(self.state_size*4, self.action_size)
+        self.linear1 = nn.Linear(self.state_size, self.state_size * 2)
+        self.linear2 = nn.Linear(self.state_size * 2, self.state_size * 4)
+        self.linear3 = nn.Linear(self.state_size * 4, self.action_size)
 
     def forward(self, state):
         output = F.relu(self.linear1(state))
@@ -47,12 +49,15 @@ class Critic(nn.Module):
         return value
 
 
-
 class MoveToBeacon(base_agent.BaseAgent):
-    def __init__(self):
+    def __init__(self, probabilty_of_random_action=1):
         super().__init__()
+        self.probabilty_of_random_action = probabilty_of_random_action
         self.actor = Actor()
         self.critic = Critic()
+        self.current_memory = []
+        self.global_memory = []
+        self.gamma = 0.99
 
     def _xy_locs(self, mask):
         """Mask should be a set of bools from comparison with a feature layer."""
@@ -77,45 +82,63 @@ class MoveToBeacon(base_agent.BaseAgent):
         return
 
     def predict(self, state):
-        processed_state = torch.FloatTensor(np.array(state.player_relative).flatten()).to(device)
-        dist = self.actor(processed_state).cpu().detach().numpy().tolist()
-        print(dist)
-        dist = np.floor(np.multiply(dist, 32))
+        processed_state = torch.FloatTensor(np.array(state).flatten()).to(device)
+        dist = self.actor(processed_state).detach().numpy().tolist()
+        dist = np.floor(np.multiply(dist, screen_size))
         return dist
 
+    def add_to_global_memory(self):
+        last_q = 0
+        for i in reversed(self.current_memory):
+            last_q = i[1] + self.gamma * last_q
+            self.global_memory.append([i[0], last_q])
+
+    def save_global_memory(self):
+        pass
+
+    def reset(self):
+        super(MoveToBeacon, self).reset()
+        self.add_to_global_memory()
+        self.save_global_memory()
 
     def step(self, obs):
         super(MoveToBeacon, self).step(obs)
 
-        state = obs.observation.feature_screen
-        reward = obs.reward
-        self.learn(state, reward)
-        coords_to_go_to = self.predict(state)
-
         if FUNCTIONS.Move_screen.id not in obs.observation.available_actions:
             return FUNCTIONS.select_army(False)
 
+        state = obs.observation.feature_screen.player_relative
+        reward = obs.reward
+        self.learn(state, reward)
+        should_act_randomly = np.random.rand() < self.probabilty_of_random_action
+        coords_to_go_to = self.predict(state) if not should_act_randomly else np.random.randint(0, screen_size, [2])
+        # print(coords_to_go_to)
+        self.current_memory.append([state, obs.reward])
         # coords_to_go_to = self.decide_coords(obs.observation.feature_screen.player_relative)
 
         return FUNCTIONS.Move_screen(False, coords_to_go_to)
 
 
 if __name__ == "__main__":
-    agent = MoveToBeacon()
+    FLAGS = flags.FLAGS
+    FLAGS(sys.argv)
+
+    agent = MoveToBeacon(1)
+
     try:
         with sc2_env.SC2Env(
-              map_name="MoveToBeacon",
-              players=[sc2_env.Agent(sc2_env.Race.terran)],
-              agent_interface_format=sc2_env.parse_agent_interface_format(
-                  feature_screen=screen_size,
-                  feature_minimap=screen_size,
-                  action_space=None,
-                  use_feature_units=False,
-                  use_raw_units=False),
-              step_mul=8,
-              game_steps_per_episode=None,
-              disable_fog=False,
-              visualize=True) as env:
-            run_loop.run_loop([agent], env, max_episodes=1000)
+                map_name="MoveToBeacon",
+                players=[sc2_env.Agent(sc2_env.Race.terran)],
+                agent_interface_format=sc2_env.parse_agent_interface_format(
+                    feature_screen=screen_size,
+                    feature_minimap=screen_size,
+                    action_space=None,
+                    use_feature_units=False,
+                    use_raw_units=False),
+                step_mul=8,
+                game_steps_per_episode=None,
+                disable_fog=False,
+                visualize=True) as env:
+            run_loop.run_loop([agent], env, max_episodes=20)
     except KeyboardInterrupt:
         pass
