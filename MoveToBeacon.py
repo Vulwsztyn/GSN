@@ -146,30 +146,33 @@ class MoveToBeacon(base_agent.BaseAgent):
 
     def step(self, obs):
         super(MoveToBeacon, self).step(obs)
+        should_act_randomly = np.random.rand() < self.probability_of_random_action
 
         if FUNCTIONS.Move_screen.id not in obs.observation.available_actions:
             return FUNCTIONS.select_army(False)
 
         state = obs.observation.feature_screen.player_relative
         reward = obs.reward
-        prediction = self.predict(state)
 
-        action = prediction.numpy().tolist()
-        action = np.floor(np.multiply(action, screen_size))
-
-        print('Prediction: ', action)
+        if not should_act_randomly:
+            prediction = self.predict(state)
+        else:
+            prediction = np.random.random_sample((2,))
+            print(prediction)
+            prediction = torch.FloatTensor(prediction).to(device)
 
         if self.last != {}:
             self.remember(state, prediction, self.last['state'], self.last['prediction'], reward)
 
         self.learn()
 
-        self.last['state'] = state.copy()
+        self.last['state'] = state
         self.last['prediction'] = prediction
 
-        should_act_randomly = np.random.rand() < self.probability_of_random_action
-        if should_act_randomly:
-            action = np.random.randint(0, screen_size, [2])
+        action = prediction.numpy().tolist()
+        action = np.floor(np.multiply(action, screen_size))
+        print('Prediction: ', prediction, ' Reward: ', reward)
+        print('Action: ', action)
         return FUNCTIONS.Move_screen(False, action)
 
 
@@ -177,7 +180,7 @@ if __name__ == "__main__":
     FLAGS = flags.FLAGS
     FLAGS(sys.argv)
 
-    agent = MoveToBeacon(1)
+    agent = MoveToBeacon()
 
     try:
         with sc2_env.SC2Env(
