@@ -13,7 +13,9 @@ import os
 actor_path = 'model/actor.pkl'
 critic_path = 'model/critic.pkl'
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+is_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if is_cuda else "cpu")
 
 learning_rate = 0.01
 FUNCTIONS = actions.FUNCTIONS
@@ -29,11 +31,12 @@ class Actor(nn.Module):
         self.linear1 = nn.Linear(self.state_size, self.state_size * 2)
         self.linear2 = nn.Linear(self.state_size * 2, self.state_size * 4)
         self.linear3 = nn.Linear(self.state_size * 4, self.action_size)
-        self.cuda(device)
+        if is_cuda:
+            self.cuda(device)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
-    def forward(self, state):
-        output = F.relu(self.linear1(state))
+    def forward(self, input):
+        output = F.relu(self.linear1(input))
         output = F.relu(self.linear2(output))
         output = F.sigmoid(self.linear3(output))
         return output
@@ -44,14 +47,15 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         self.state_size = screen_size * screen_size
         self.action_size = 2
-        self.linear1 = nn.Linear(self.state_size, self.state_size * 2)
+        self.linear1 = nn.Linear(self.state_size+self.action_size, self.state_size * 2)
         self.linear2 = nn.Linear(self.state_size * 2, self.state_size * 4)
-        self.linear3 = nn.Linear(self.state_size * 4, self.action_size)
-        self.cuda(device)
+        self.linear3 = nn.Linear(self.state_size * 4, 1)
+        if is_cuda:
+            self.cuda(device)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
-    def forward(self, state):
-        output = F.relu(self.linear1(state))
+    def forward(self, input):
+        output = F.relu(self.linear1(input))
         output = F.relu(self.linear2(output))
         value = self.linear3(output)
         return value
@@ -99,16 +103,21 @@ class MoveToBeacon(base_agent.BaseAgent):
 
     def learn(self, state, reward):
         if self.last != {}:
+            prediction = self.actor(torch.FloatTensor(np.array(state).flatten()).to(device))
+
+            processed_critic_input = torch.FloatTensor(np.concatenate((np.array(state).flatten(), prediction.detach().numpy().tolist()))).to(device)
+            processed_critic_input_last = torch.FloatTensor(np.concatenate((np.array(self.last['state']).flatten(), self.last['prediction'].detach().numpy().tolist()))).to(device)
+
             self.actor.optimizer.zero_grad()
             self.critic.optimizer.zero_grad()
 
             reward = torch.tensor(reward, dtype=torch.float).to(device)
-            delta = reward + self.gamma * self.critic(state) - self.critic(self.last['state'])
+            delta = reward + self.gamma * self.critic(processed_critic_input) - self.critic(processed_critic_input_last)
             actor_loss = - self.last['prediction'] * delta
             critic_loss = delta ** 2
 
-            actor_loss.backward()
-            critic_loss.backward()
+            actor_loss.mean().backward(retain_graph=True)
+            critic_loss.backward(retain_graph=True)
 
             self.actor.optimizer.step()
             self.critic.optimizer.step()
@@ -116,10 +125,15 @@ class MoveToBeacon(base_agent.BaseAgent):
     def predict(self, state):
         processed_state = torch.FloatTensor(np.array(state).flatten()).to(device)
         prediction = self.actor(processed_state)
+        self.last['prediction'] = prediction
         dist = prediction.detach().numpy().tolist()
         dist = np.floor(np.multiply(dist, screen_size))
-        self.last['prediction'] = prediction
         return dist
+
+    def remember(self, state, prediction, reward):
+        if len(self.current_memory):
+            self.current_memory[-1].append(reward)
+            self.current_memory.append([state, prediction])
 
     def add_to_global_memory(self):
         last_q = 0
@@ -147,13 +161,17 @@ class MoveToBeacon(base_agent.BaseAgent):
         self.learn(state, reward)
 
         should_act_randomly = np.random.rand() < self.probability_of_random_action
-        coords_to_go_to = self.predict(state) if not should_act_randomly else np.random.randint(0, screen_size, [2])
+        prediction = self.predict(state)
+        print('Prediction: ', prediction)
+        if should_act_randomly:
+            prediction = np.random.randint(0, screen_size, [2])
 
-        # print(coords_to_go_to)
-        self.current_memory.append([state, obs.reward])
+        self.remember(state, prediction, reward)
 
         self.last['state'] = state
-        return FUNCTIONS.Move_screen(False, coords_to_go_to)
+
+        self.probability_of_random_action = self.probability_of_random_action * 0.99
+        return FUNCTIONS.Move_screen(False, prediction)
 
 
 if __name__ == "__main__":
