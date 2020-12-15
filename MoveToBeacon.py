@@ -13,7 +13,6 @@ import os
 actor_path = 'model/actor.pkl'
 critic_path = 'model/critic.pkl'
 
-
 is_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if is_cuda else "cpu")
 
@@ -47,7 +46,7 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         self.state_size = screen_size * screen_size
         self.action_size = 2
-        self.linear1 = nn.Linear(self.state_size+self.action_size, self.state_size * 2)
+        self.linear1 = nn.Linear(self.state_size + self.action_size, self.state_size * 2)
         self.linear2 = nn.Linear(self.state_size * 2, self.state_size * 4)
         self.linear3 = nn.Linear(self.state_size * 4, 1)
         if is_cuda:
@@ -105,8 +104,10 @@ class MoveToBeacon(base_agent.BaseAgent):
         if self.last != {}:
             prediction = self.actor(torch.FloatTensor(np.array(state).flatten()).to(device))
 
-            processed_critic_input = torch.FloatTensor(np.concatenate((np.array(state).flatten(), prediction.detach().numpy().tolist()))).to(device)
-            processed_critic_input_last = torch.FloatTensor(np.concatenate((np.array(self.last['state']).flatten(), self.last['prediction'].detach().numpy().tolist()))).to(device)
+            processed_critic_input = torch.FloatTensor(
+                np.concatenate((np.array(state).flatten(), prediction.detach().numpy().tolist()))).to(device)
+            processed_critic_input_last = torch.FloatTensor(np.concatenate(
+                (np.array(self.last['state']).flatten(), self.last['prediction'].detach().numpy().tolist()))).to(device)
 
             self.actor.optimizer.zero_grad()
             self.critic.optimizer.zero_grad()
@@ -125,21 +126,14 @@ class MoveToBeacon(base_agent.BaseAgent):
     def predict(self, state):
         processed_state = torch.FloatTensor(np.array(state).flatten()).to(device)
         prediction = self.actor(processed_state)
-        self.last['prediction'] = prediction
-        dist = prediction.detach().numpy().tolist()
-        dist = np.floor(np.multiply(dist, screen_size))
-        return dist
+        return prediction
 
-    def remember(self, state, prediction, reward):
-        if len(self.current_memory):
-            self.current_memory[-1].append(reward)
-            self.current_memory.append([state, prediction])
+    def remember(self, state, prediction, previous_state, previous_prediction, reward):
+        self.current_memory.append([state, prediction, previous_state, previous_prediction, reward])
 
     def add_to_global_memory(self):
-        last_q = 0
-        for i in reversed(self.current_memory):
-            last_q = i[1] + self.gamma * last_q
-            self.global_memory.append([i[0], last_q])
+        for i in self.current_memory:
+            self.global_memory.append(i)
 
     def save_global_memory(self):
         pass
@@ -157,21 +151,26 @@ class MoveToBeacon(base_agent.BaseAgent):
 
         state = obs.observation.feature_screen.player_relative
         reward = obs.reward
+        prediction = self.predict(state)
 
+        action = prediction.detach().numpy().tolist()
+        action = np.floor(np.multiply(action, screen_size))
+
+        print('Prediction: ', action)
         self.learn(state, reward)
 
-        should_act_randomly = np.random.rand() < self.probability_of_random_action
-        prediction = self.predict(state)
-        print('Prediction: ', prediction)
-        if should_act_randomly:
-            prediction = np.random.randint(0, screen_size, [2])
-
-        self.remember(state, prediction, reward)
+        if self.last != {}:
+            self.remember(state, prediction, self.last['state'], self.last['prediction'], reward)
 
         self.last['state'] = state
+        self.last['prediction'] = prediction
 
+        should_act_randomly = np.random.rand() < self.probability_of_random_action
+        if should_act_randomly:
+            action = np.random.randint(0, screen_size, [2])
         self.probability_of_random_action = self.probability_of_random_action * 0.99
-        return FUNCTIONS.Move_screen(False, prediction)
+
+        return FUNCTIONS.Move_screen(False, action)
 
 
 if __name__ == "__main__":
