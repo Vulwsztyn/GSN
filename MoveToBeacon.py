@@ -8,10 +8,14 @@ from pysc2.lib import actions, features
 import numpy as np
 import sys
 from absl import flags
+import os
+
+actor_path = 'model/actor.pkl'
+critic_path = 'model/critic.pkl'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-lr = 0.01
+learning_rate = 0.01
 FUNCTIONS = actions.FUNCTIONS
 _PLAYER_NEUTRAL = features.PlayerRelative.NEUTRAL
 screen_size = 32
@@ -25,6 +29,8 @@ class Actor(nn.Module):
         self.linear1 = nn.Linear(self.state_size, self.state_size * 2)
         self.linear2 = nn.Linear(self.state_size * 2, self.state_size * 4)
         self.linear3 = nn.Linear(self.state_size * 4, self.action_size)
+        self.cuda(device)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
     def forward(self, state):
         output = F.relu(self.linear1(state))
@@ -41,6 +47,8 @@ class Critic(nn.Module):
         self.linear1 = nn.Linear(self.state_size, self.state_size * 2)
         self.linear2 = nn.Linear(self.state_size * 2, self.state_size * 4)
         self.linear3 = nn.Linear(self.state_size * 4, self.action_size)
+        self.cuda(device)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
     def forward(self, state):
         output = F.relu(self.linear1(state))
@@ -50,13 +58,24 @@ class Critic(nn.Module):
 
 
 class MoveToBeacon(base_agent.BaseAgent):
-    def __init__(self, probabilty_of_random_action=1):
+    def __init__(self, probability_of_random_action=1):
         super().__init__()
-        self.probabilty_of_random_action = probabilty_of_random_action
-        self.actor = Actor()
-        self.critic = Critic()
+        self.probability_of_random_action = probability_of_random_action
+        self.actor = None
+        self.critic = None
+        if os.path.isfile(actor_path):
+            self.actor = torch.load(actor_path)
+            self.actor.eval()
+        else:
+            self.actor = Actor()
+        if os.path.isfile(critic_path):
+            self.critic = torch.load(critic_path)
+            self.critic.eval()
+        else:
+            self.critic = Critic()
         self.current_memory = []
         self.global_memory = []
+        self.last = {}
         self.gamma = 0.99
 
     def _xy_locs(self, mask):
@@ -79,12 +98,27 @@ class MoveToBeacon(base_agent.BaseAgent):
         torch.save(self.critic, 'model/critic.pkl')
 
     def learn(self, state, reward):
-        return
+        if self.last != {}:
+            self.actor.optimizer.zero_grad()
+            self.critic.optimizer.zero_grad()
+
+            reward = torch.tensor(reward, dtype=torch.float).to(device)
+            delta = reward + self.gamma * self.critic(state) - self.critic(self.last['state'])
+            actor_loss = - self.last['prediction'] * delta
+            critic_loss = delta ** 2
+
+            actor_loss.backward()
+            critic_loss.backward()
+
+            self.actor.optimizer.step()
+            self.critic.optimizer.step()
 
     def predict(self, state):
         processed_state = torch.FloatTensor(np.array(state).flatten()).to(device)
-        dist = self.actor(processed_state).detach().numpy().tolist()
+        prediction = self.actor(processed_state)
+        dist = prediction.detach().numpy().tolist()
         dist = np.floor(np.multiply(dist, screen_size))
+        self.last['prediction'] = prediction
         return dist
 
     def add_to_global_memory(self):
@@ -109,13 +143,16 @@ class MoveToBeacon(base_agent.BaseAgent):
 
         state = obs.observation.feature_screen.player_relative
         reward = obs.reward
+
         self.learn(state, reward)
-        should_act_randomly = np.random.rand() < self.probabilty_of_random_action
+
+        should_act_randomly = np.random.rand() < self.probability_of_random_action
         coords_to_go_to = self.predict(state) if not should_act_randomly else np.random.randint(0, screen_size, [2])
+
         # print(coords_to_go_to)
         self.current_memory.append([state, obs.reward])
-        # coords_to_go_to = self.decide_coords(obs.observation.feature_screen.player_relative)
 
+        self.last['state'] = state
         return FUNCTIONS.Move_screen(False, coords_to_go_to)
 
 
@@ -139,6 +176,6 @@ if __name__ == "__main__":
                 game_steps_per_episode=None,
                 disable_fog=False,
                 visualize=True) as env:
-            run_loop.run_loop([agent], env, max_episodes=20)
+            run_loop.run_loop([agent], env, max_episodes=1)
     except KeyboardInterrupt:
         pass
