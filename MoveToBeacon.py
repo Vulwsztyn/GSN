@@ -100,21 +100,21 @@ class MoveToBeacon(base_agent.BaseAgent):
         torch.save(self.actor, 'model/actor.pkl')
         torch.save(self.critic, 'model/critic.pkl')
 
-    def learn(self, state, reward):
-        if self.last != {}:
-            prediction = self.actor(torch.FloatTensor(np.array(state).flatten()).to(device))
+    def learn(self):
+        if len(self.current_memory) > 0:
+            state, prediction, previous_state, previous_prediction, reward = self.current_memory[-1]
 
             processed_critic_input = torch.FloatTensor(
-                np.concatenate((np.array(state).flatten(), prediction.detach().numpy().tolist()))).to(device)
+                np.concatenate((np.array(state).flatten(), prediction.numpy().tolist()))).to(device)
             processed_critic_input_last = torch.FloatTensor(np.concatenate(
-                (np.array(self.last['state']).flatten(), self.last['prediction'].detach().numpy().tolist()))).to(device)
+                (np.array(previous_state).flatten(), previous_prediction.numpy().tolist()))).to(device)
 
             self.actor.optimizer.zero_grad()
             self.critic.optimizer.zero_grad()
 
             reward = torch.tensor(reward, dtype=torch.float).to(device)
             delta = reward + self.gamma * self.critic(processed_critic_input) - self.critic(processed_critic_input_last)
-            actor_loss = - self.last['prediction'] * delta
+            actor_loss = - previous_prediction * delta
             critic_loss = delta ** 2
 
             actor_loss.mean().backward(retain_graph=True)
@@ -126,7 +126,7 @@ class MoveToBeacon(base_agent.BaseAgent):
     def predict(self, state):
         processed_state = torch.FloatTensor(np.array(state).flatten()).to(device)
         prediction = self.actor(processed_state)
-        return prediction
+        return prediction.detach()
 
     def remember(self, state, prediction, previous_state, previous_prediction, reward):
         self.current_memory.append([state, prediction, previous_state, previous_prediction, reward])
@@ -142,6 +142,7 @@ class MoveToBeacon(base_agent.BaseAgent):
         super(MoveToBeacon, self).reset()
         self.add_to_global_memory()
         self.save_global_memory()
+        self.probability_of_random_action = self.probability_of_random_action * 0.9
 
     def step(self, obs):
         super(MoveToBeacon, self).step(obs)
@@ -153,23 +154,22 @@ class MoveToBeacon(base_agent.BaseAgent):
         reward = obs.reward
         prediction = self.predict(state)
 
-        action = prediction.detach().numpy().tolist()
+        action = prediction.numpy().tolist()
         action = np.floor(np.multiply(action, screen_size))
 
         print('Prediction: ', action)
-        self.learn(state, reward)
 
         if self.last != {}:
             self.remember(state, prediction, self.last['state'], self.last['prediction'], reward)
 
-        self.last['state'] = state
+        self.learn()
+
+        self.last['state'] = state.copy()
         self.last['prediction'] = prediction
 
         should_act_randomly = np.random.rand() < self.probability_of_random_action
         if should_act_randomly:
             action = np.random.randint(0, screen_size, [2])
-        self.probability_of_random_action = self.probability_of_random_action * 0.99
-
         return FUNCTIONS.Move_screen(False, action)
 
 
@@ -193,6 +193,6 @@ if __name__ == "__main__":
                 game_steps_per_episode=None,
                 disable_fog=False,
                 visualize=True) as env:
-            run_loop.run_loop([agent], env, max_episodes=1)
+            run_loop.run_loop([agent], env, max_episodes=10)
     except KeyboardInterrupt:
         pass
