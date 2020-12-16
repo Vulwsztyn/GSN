@@ -105,9 +105,9 @@ class MoveToBeacon(base_agent.BaseAgent):
             state, prediction, previous_state, previous_prediction, reward = self.current_memory[-1]
 
             processed_critic_input = torch.FloatTensor(
-                np.concatenate((np.array(state).flatten(), prediction.numpy().tolist()))).to(device)
+                np.concatenate((np.array(state).flatten(), prediction.cpu().numpy().tolist()))).to(device)
             processed_critic_input_last = torch.FloatTensor(np.concatenate(
-                (np.array(previous_state).flatten(), previous_prediction.numpy().tolist()))).to(device)
+                (np.array(previous_state).flatten(), previous_prediction.cpu().numpy().tolist()))).to(device)
 
             self.actor.optimizer.zero_grad()
             self.critic.optimizer.zero_grad()
@@ -169,7 +169,7 @@ class MoveToBeacon(base_agent.BaseAgent):
         self.last['state'] = state
         self.last['prediction'] = prediction
 
-        action = prediction.numpy().tolist()
+        action = prediction.cpu().numpy().tolist()
         action = np.floor(np.multiply(action, screen_size))
         print('Prediction: ', prediction, ' Reward: ', reward)
         print('Action: ', action)
