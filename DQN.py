@@ -14,8 +14,8 @@ from tensorboardX import SummaryWriter
 import math
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
-target_path = 'model/dqn_target.pkl'
-act_path = 'model/dqn_act.pkl'
+target_path = 'model/dqn_target_2.pkl'
+act_path = 'model/dqn_act_2.pkl'
 
 is_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if is_cuda else "cpu")
@@ -45,8 +45,8 @@ class Net(nn.Module):
 
 
 class DQN(base_agent.BaseAgent):
-    capacity = 3600
-    learning_rate = 1e-3
+    capacity = 720
+    learning_rate = 1e-2
     memory_count = 0
     batch_size = min(360, capacity)
     gamma = 0.995
@@ -60,11 +60,13 @@ class DQN(base_agent.BaseAgent):
         if os.path.isfile(target_path):
             self.target_net = torch.load(target_path)
             self.target_net.eval()
+            print('target loaded')
         else:
             self.target_net = Net()
         if os.path.isfile(act_path):
             self.act_net = torch.load(act_path)
             self.act_net.eval()
+            print('act loaded')
         else:
             self.act_net = Net()
         self.memory = [None] * self.capacity
@@ -87,6 +89,9 @@ class DQN(base_agent.BaseAgent):
             rand_coords = torch.randint(0, 32, (2,))
             x = rand_coords[0]
             y = rand_coords[1]
+            print('random', x, y)
+        else:
+            print('siec', x, y)
         return x.item(), y.item()
 
     def store_transition(self, transition):
@@ -96,37 +101,55 @@ class DQN(base_agent.BaseAgent):
         return self.memory_count >= self.capacity
 
     def update(self):
-        if self.memory_count >= self.capacity: # pominiemy pierwsze ileś 10 uczeń, ale nie chce mi sie
-            states = torch.tensor([t.state for t in self.memory]).float()
-            actions = torch.tensor([t.action for t in self.memory]).float()
-            rewards = torch.tensor([t.reward for t in self.memory]).float()
-            next_states = torch.tensor([t.next_state for t in self.memory]).float()
+        pass
+        if self.memory_count >= self.capacity:  # pominiemy pierwsze ileś 10 uczeń, ale nie chce mi sie
+            sample_index = np.random.choice(self.capacity, self.batch_size)
+            batch_memory = np.array(self.memory, dtype=Transition)[sample_index, :]
 
-            #  idk if konieczne
-            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
-            target_v = None
-            with torch.no_grad():
-                target_v = rewards + self.gamma * self.target_net.forward(next_states).max(1)[0]
+            states = torch.tensor([t[0] for t in batch_memory]).float()
+            actions = torch.tensor([t[1] for t in batch_memory]).float()
+            rewards = torch.tensor([t[2] for t in batch_memory]).float()
+            next_states = torch.tensor([t[3] for t in batch_memory]).float()
 
-            # Update...
-            for index in BatchSampler(SubsetRandomSampler(range(len(self.memory))), batch_size=self.batch_size,
-                                      drop_last=False):
-                # v = (self.act_net.forward(states).gather(1, actions))[index]
-                t = self.act_net.forward(states)  # np. 50 na 64 
-                t = torch.reshape(t, (self.capacity * 2, 32))  # np. 100 na 32
-                actions_reshaped = torch.reshape(actions, (
-                    self.capacity * 2, 1)).long()  # akcje jako wektor np 100 na 1 x1,y2,x2,y2,x3,y3,x4,y4,...
-                loss = self.loss_func(target_v[index].unsqueeze(1),
-                                      t.gather(1, actions_reshaped)[index])
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                self.writer.add_scalar('loss/value_loss', loss, self.update_count)
-                self.update_count += 1
-                if self.update_count % 100 == 0:
-                    self.target_net.load_state_dict(self.act_net.state_dict())
-            self.learnings_count += 1
-            print('learned {} times'.format(self.learnings_count))
+            t = self.act_net.forward(states)  # np. 50 na 64 
+            t = torch.reshape(t, (self.batch_size * 2, 32))
+            actions_reshaped = torch.reshape(actions, (
+                self.batch_size * 2, 1)).long()
+            q_eval = t.gather(1, actions_reshaped)
+            q_next = self.target_net.forward(next_states).detach()
+            q_target = rewards + self.gamma * q_next.max(1)[0]#.view(self.batch_size, 1)
+            q_target = torch.reshape(torch.transpose(torch.stack((q_target, q_target), 0), 0, 1),
+                                     (self.batch_size * 2,1))  # robi z 1,2,3 1,1,2,2,3,3
+            loss = self.loss_func(q_eval, q_target)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            return
+            # #  idk if konieczne
+            # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+            # target_v = None
+            # with torch.no_grad():
+            #     target_v = rewards + self.gamma * self.target_net.forward(next_states).max(1)[0]
+            #
+            # # Update...
+            # for index in BatchSampler(SubsetRandomSampler(range(len(self.memory))), batch_size=self.batch_size,
+            #                           drop_last=False):
+            #     # v = (self.act_net.forward(states).gather(1, actions))[index]
+            #     t = self.act_net.forward(states)  # np. 50 na 64
+            #     t = torch.reshape(t, (self.capacity * 2, 32))  # np. 100 na 32
+            #     actions_reshaped = torch.reshape(actions, (
+            #         self.capacity * 2, 1)).long()  # akcje jako wektor np 100 na 1 x1,y2,x2,y2,x3,y3,x4,y4,...
+            #     loss = self.loss_func(target_v[index].unsqueeze(1),
+            #                           t.gather(1, actions_reshaped)[index])
+            #     self.optimizer.zero_grad()
+            #     loss.backward()
+            #     self.optimizer.step()
+            #     self.writer.add_scalar('loss/value_loss', loss, self.update_count)
+            #     self.update_count += 1
+            #     if self.update_count % 100 == 0:
+            #         self.target_net.load_state_dict(self.act_net.state_dict())
+            # self.learnings_count += 1
+            # print('learned {} times'.format(self.learnings_count))
 
     def reset(self):
         super(DQN, self).reset()
@@ -180,9 +203,13 @@ if __name__ == "__main__":
                 game_steps_per_episode=None,
                 disable_fog=False,
                 visualize=True) as env:
-            for i in [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]:
+            # for i in [0]:
+            #     print('probability_of_random_action:', i)
+            #     agent.set_probability_of_random_action(i)
+            #     run_loop.run_loop([agent], env, max_episodes=10)
+            for i in [0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]:
                 print('probability_of_random_action:', i)
                 agent.set_probability_of_random_action(i)
-                run_loop.run_loop([agent], env, max_episodes=600)
+                run_loop.run_loop([agent], env, max_episodes=400)
     except KeyboardInterrupt:
         pass
