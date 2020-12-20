@@ -1,3 +1,5 @@
+from collections import deque
+
 from pysc2.env import sc2_env, run_loop
 import torch
 from pysc2.agents import base_agent
@@ -12,15 +14,10 @@ from tensorflow.keras.models import Sequential, model_from_json
 from tensorflow.keras.layers import Dense, Dropout, Activation, Convolution2D, Flatten
 from tensorflow.keras.optimizers import SGD, Adam
 
-actor_path = 'model/actor.pkl'
-critic_path = 'model/critic.pkl'
-
-is_cuda = torch.cuda.is_available()
-device = torch.device("cuda" if is_cuda else "cpu")
-
 BUILD_UNIT = 0.1
-KILL_UNIT_REWARD = 0.2
-KILL_BUILDING_REWARD = 0.5
+SENT_ATTACK = 0.2
+IDLE_FREED = 0.05
+NO_QUEUE = 0
 
 
 class QNetwork():
@@ -28,8 +25,8 @@ class QNetwork():
     def __init__(self,
                  legal_actions,
                  state_size,
-                 gamma=0.9,
-                 alpha=0.001,
+                 gamma=0.6,
+                 alpha=0.01,
                  train=1,
                  **args):
 
@@ -37,14 +34,13 @@ class QNetwork():
         self.legal_actions = legal_actions
         self.gamma = gamma
         self.alpha = alpha
-        self.experience = {}
-        self.experience['positivy'] = []
-        self.experience['negativy'] = []
         self.train = train
-        self.lastAction = random.choice(['East', 'West', 'North', 'South'])
+        self.lastAction = None
+
+        sgd = SGD(lr=self.alpha)
 
         if not os.path.isfile('network.json'):
-            input_size = len(self.legal_actions) + self.state_size
+            input_size = self.state_size
             print('Initializing network ...')
             self.network = Sequential()
             self.network.add(
@@ -53,9 +49,8 @@ class QNetwork():
                 Dense(input_size * 2, kernel_initializer="uniform", activation='relu'))
             self.network.add(
                 Dense(input_size * 1, kernel_initializer="uniform", activation='relu'))
-            self.network.add(Dense(1, kernel_initializer="uniform", activation='sigmoid'))
+            self.network.add(Dense(len(self.legal_actions), kernel_initializer="uniform", activation='tanh'))
 
-            sgd = SGD(lr=self.alpha)
             self.network.compile(loss='mean_squared_error', optimizer=sgd)
 
             json_string = self.network.to_json()
@@ -65,51 +60,50 @@ class QNetwork():
         else:
             print('Loading network ...')
             self.network = model_from_json(open('network.json').read())
-            sgd = SGD(lr=self.alpha, momentum=0.9, nesterov=True)
             self.network.load_weights('weights.h5')
             self.network.compile(loss='mean_squared_error', optimizer=sgd)
+        self.target_network = self.network
         print('Network is ready to use.')
 
-    def getQValue(self, state, action):
-        encoded_action = np.array([1 if x == action else 0 for x in self.legal_actions])
-        input = np.array([np.concatenate((np.array(state), encoded_action))])
-        return self.network.predict(input)[0][0]
+    def learn(self, replay_memory):
 
-    def computeValueFromQValues(self, state):
-        return max([self.getQValue(state, x) for x in self.legal_actions])
+        learning_rate = self.alpha
+        discount_factor = self.gamma
+        MIN_REPLAY_SIZE = 200
 
-    def computeActionFromQValues(self, state):
-        values = [self.getQValue(state, x) for x in self.legal_actions]
-        max_values = [x for x in values if x == max(values)]
-        if len(max_values) > 1:
-            maxValue = random.choice(max_values)
-            for x in max_values:
-                if x == self.lastAction:
-                    maxValue = x
-                    break
-        else:
-            maxValue = max(values)
-        return random.choice([a for a, v in zip(self.legal_actions, values) if v == maxValue])
+        if len(replay_memory) < MIN_REPLAY_SIZE:
+            return
 
-    def getAction(self, state):
-        action = self.computeActionFromQValues(state)
-        self.lastAction = action
-        return action
+        print("Getting smarter...")
+        batch_size = 64 * 2
+        mini_batch = random.sample(replay_memory, batch_size)
+        current_states = np.array([transition[0] for transition in mini_batch])
+        current_qs_list = self.network.predict(current_states)
 
-    def learn(self, state, action, new_state, reward):
-        if new_state != 'terminal':
-            q_target = reward + self.gamma * self.computeValueFromQValues(new_state)
-        else:
-            q_target = reward
-        encoded_action = np.array([1 if x == action else 0 for x in self.legal_actions])
-        input = np.array([np.concatenate((np.array(state), encoded_action))])
-        self.network.fit(input, np.array([q_target]), batch_size=1, verbose=0)
+        new_current_states = np.array([transition[3] for transition in mini_batch])
+        future_qs_list = self.target_network.predict(new_current_states)
 
-    def getPolicy(self, state):
-        return self.computeActionFromQValues(state)
+        X = []
+        Y = []
 
-    def getValue(self, state):
-        return self.computeValueFromQValues(state)
+        for index, (state, action, reward, new_state) in enumerate(mini_batch):
+            if new_state != 'terminal':
+                max_future_q = reward + discount_factor * np.max(future_qs_list[index])
+            else:
+                max_future_q = reward
+
+            current_qs = current_qs_list[index]
+            current_qs[action] = (1 - learning_rate) * current_qs[action] + learning_rate * max_future_q
+
+            X.append(state)
+            Y.append(current_qs)
+        self.network.fit(np.array(X), np.array(Y), batch_size=batch_size, verbose=0, shuffle=True)
+
+    def update_target(self):
+        self.target_network.set_weights(self.network.get_weights())
+
+    def predict(self, state):
+        return self.network.predict(state)
 
 
 class Agent(base_agent.BaseAgent):
@@ -120,7 +114,30 @@ class Agent(base_agent.BaseAgent):
                "train_marine",
                "attack"]
 
-    def get_legal_actions:
+    def getActions(self):
+        return self.actions
+
+    def get_legal_actions(self, obs):
+        legal_actions = [1, 0, 0, 0, 0, 0]
+        for i in self.actions:
+            if i == "harvest_minerals":
+                idle_scvs = [scv for scv in self.get_my_units_by_type(obs, units.Terran.SCV) if scv.order_length == 0]
+                if len(idle_scvs) > 0:
+                    legal_actions[1] = 1
+            if i == "build_supply_depot":
+                if len(self.get_my_completed_units_by_type(obs, units.Terran.SupplyDepot)) < 5:
+                    legal_actions[2] = 1
+            if i == "build_barracks":
+                if len(self.get_my_completed_units_by_type(obs, units.Terran.SupplyDepot)) > 0:
+                    legal_actions[3] = 1
+            if i == "train_marine":
+                if len(self.get_my_completed_units_by_type(obs, units.Terran.Barracks)) > 0:
+                    legal_actions[4] = 1
+            if i == "attack":
+                if len([marine for marine in self.get_my_units_by_type(obs, units.Terran.Marine) if
+                        marine.order_length == 0]):
+                    legal_actions[5] = 1
+        return legal_actions
 
     def get_my_units_by_type(self, obs, unit_type):
         return [unit for unit in obs.observation.raw_units
@@ -187,11 +204,11 @@ class Agent(base_agent.BaseAgent):
     def build_supply_depot(self, obs):
         supply_depots = self.get_my_units_by_type(obs, units.Terran.SupplyDepot)
         scvs = self.get_my_units_by_type(obs, units.Terran.SCV)
-        if (len(supply_depots) == 0 and obs.observation.player.minerals >= 100 and
+        if (obs.observation.player.minerals >= 100 and
                 len(scvs) > 0):
-            supply_depot_xy = (22, 26) if self.base_top_left else (35, 42)
-            distances = self.get_distances(obs, scvs, supply_depot_xy)
-            scv = scvs[np.argmin(distances)]
+            supply_depot_xy = (20 - 2 * len(supply_depots), 28) if self.base_top_left else (
+                37 + 2 * len(supply_depots), 40)
+            scv = random.choice(scvs)
             return actions.RAW_FUNCTIONS.Build_SupplyDepot_pt(
                 "now", scv.tag, supply_depot_xy)
         return actions.RAW_FUNCTIONS.no_op()
@@ -201,11 +218,16 @@ class Agent(base_agent.BaseAgent):
             obs, units.Terran.SupplyDepot)
         barrackses = self.get_my_units_by_type(obs, units.Terran.Barracks)
         scvs = self.get_my_units_by_type(obs, units.Terran.SCV)
-        if (len(completed_supply_depots) > 0 and len(barrackses) == 0 and
+        if (len(completed_supply_depots) > 0 and
                 obs.observation.player.minerals >= 150 and len(scvs) > 0):
-            barracks_xy = (22, 21) if self.base_top_left else (35, 45)
-            distances = self.get_distances(obs, scvs, barracks_xy)
-            scv = scvs[np.argmin(distances)]
+            x_offset = 0
+            count = len(barrackses)
+            if count > 3:
+                x_offset = 2
+                count = count - 4
+            barracks_xy = (22 + x_offset, 21 + count * 2 - x_offset) if self.base_top_left else (
+                35 - x_offset, 47 - count * 2 + x_offset)
+            scv = random.choice(scvs)
             return actions.RAW_FUNCTIONS.Build_Barracks_pt(
                 "now", scv.tag, barracks_xy)
         return actions.RAW_FUNCTIONS.no_op()
@@ -217,17 +239,18 @@ class Agent(base_agent.BaseAgent):
                        obs.observation.player.food_used)
         if (len(completed_barrackses) > 0 and obs.observation.player.minerals >= 100
                 and free_supply > 0):
-            barracks = self.get_my_units_by_type(obs, units.Terran.Barracks)[0]
+            barracks = random.choice(self.get_my_units_by_type(obs, units.Terran.Barracks))
             if barracks.order_length < 5:
                 return actions.RAW_FUNCTIONS.Train_Marine_quick("now", barracks.tag)
         return actions.RAW_FUNCTIONS.no_op()
 
     def attack(self, obs):
         marines = self.get_my_units_by_type(obs, units.Terran.Marine)
-        if len(marines) > 0:
-            attack_xy = (38, 44) if self.base_top_left else (19, 23)
-            distances = self.get_distances(obs, marines, attack_xy)
-            marine = marines[np.argmax(distances)]
+        idle_marines = [marine for marine in marines if marine.order_length == 0]
+        if len(idle_marines) > 0:
+            attack_xy = (40, 44) if self.base_top_left else (17, 23)
+            distances = self.get_distances(obs, idle_marines, attack_xy)
+            marine = idle_marines[np.argmax(distances)]
             x_offset = random.randint(-4, 4)
             y_offset = random.randint(-4, 4)
             return actions.RAW_FUNCTIONS.Attack_pt(
@@ -239,20 +262,34 @@ class TerranAgent(Agent):
     def __init__(self):
         super(TerranAgent, self).__init__()
 
+        self.replay_memory = deque(maxlen=50_000)
         self.previous_killed_unit_score = 0
         self.previous_killed_building_score = 0
         self.marines = 0
+        self.idle_marines = 0
+        self.idle_scvs = 0
+        self.queue = 0
+        self.steps_to_update_target_model = 0
 
-        self.epsilon = 0.9
-        self.qnetwork = QNetwork(self.actions, 13)
+        self.previous_state = None
+        self.previous_action = None
+        self.base_top_left = None
+
+        self.epsilon = 1
+        self.qnetwork = QNetwork(self.actions, 12)
         self.new_game()
 
     def reset(self):
         super(TerranAgent, self).reset()
-        self.epsilon = self.epsilon * 0.9
+        self.epsilon = self.epsilon * 0.95
         self.new_game()
 
     def new_game(self):
+        self.previous_killed_unit_score = 0
+        self.previous_killed_building_score = 0
+        self.marines = 0
+        self.idle_marines = 0
+        self.idle_scvs = 0
         self.base_top_left = None
         self.previous_state = None
         self.previous_action = None
@@ -260,7 +297,6 @@ class TerranAgent(Agent):
     def get_state(self, obs):
         scvs = self.get_my_units_by_type(obs, units.Terran.SCV)
         idle_scvs = [scv for scv in scvs if scv.order_length == 0]
-        command_centers = self.get_my_units_by_type(obs, units.Terran.CommandCenter)
         supply_depots = self.get_my_units_by_type(obs, units.Terran.SupplyDepot)
         completed_supply_depots = self.get_my_completed_units_by_type(
             obs, units.Terran.SupplyDepot)
@@ -268,19 +304,33 @@ class TerranAgent(Agent):
         completed_barrackses = self.get_my_completed_units_by_type(
             obs, units.Terran.Barracks)
         marines = self.get_my_units_by_type(obs, units.Terran.Marine)
+        idle_marines = [marine for marine in marines if marine.order_length == 0]
 
-        queued_marines = (completed_barrackses[0].order_length
-                          if len(completed_barrackses) > 0 else 0)
+        queued_marines = np.sum([barracks.order_length for barracks in completed_barrackses])
 
         free_supply = (obs.observation.player.food_cap -
                        obs.observation.player.food_used)
         can_afford_supply_depot = obs.observation.player.minerals >= 100
         can_afford_barracks = obs.observation.player.minerals >= 150
-        can_afford_marine = obs.observation.player.minerals >= 100
+        can_afford_marine = obs.observation.player.minerals >= 50
 
-        return (len(command_centers),
-                len(scvs),
-                len(idle_scvs),
+        print(
+            'Idle SCVs: ', len(idle_scvs),
+            ' Idle Marines: ', len(idle_marines),
+            ' Depots: ', len(supply_depots),
+            ' Completed Depots: ', len(completed_supply_depots),
+            ' Barracks: ', len(barrackses),
+            ' Completed Barracks: ', len(completed_barrackses),
+            ' Marines: ', len(marines),
+            ' Queued Marines: ', queued_marines,
+            ' Free supply: ', free_supply,
+            ' Affort Supply: ', can_afford_supply_depot,
+            ' Afford Barracks: ', can_afford_barracks,
+            ' Affort Marine: ', can_afford_marine,
+        )
+
+        return (len(idle_scvs),
+                len(idle_marines),
                 len(supply_depots),
                 len(completed_supply_depots),
                 len(barrackses),
@@ -292,55 +342,84 @@ class TerranAgent(Agent):
                 can_afford_barracks,
                 can_afford_marine)
 
-    def customReward(self, obs, state):
+    def customReward(self, obs, state, previous_action, previous_state):
         killed_unit_score = obs.observation['score_cumulative'][5]
         killed_building_score = obs.observation['score_cumulative'][6]
-        marines = state[7]
+        marines = state[6]
+        queue = state[7]
+        barrackses = state[5]
+        idle_marines = previous_state[1]
+        idle_scvs = previous_state[0]
 
         reward = obs.reward
         if reward == 0:
-            if killed_unit_score > self.previous_killed_unit_score:
-                reward += KILL_UNIT_REWARD
-
-            if killed_building_score > self.previous_killed_building_score:
-                reward += KILL_BUILDING_REWARD
+            # if killed_unit_score > self.previous_killed_unit_score:
+            #     reward += KILL_UNIT_REWARD
+            #
+            # if killed_building_score > self.previous_killed_building_score:
+            #     reward += KILL_BUILDING_REWARD
 
             if marines > self.marines:
                 reward += BUILD_UNIT
 
+            if previous_action == 'attack' and idle_marines > 0:
+                reward += SENT_ATTACK
+
+            if previous_action == 'harvest_minerals' and idle_scvs > 0:
+                reward += IDLE_FREED
+
+            if queue == 0 and barrackses > 0:
+                reward += NO_QUEUE
+
+            if barrackses > queue > self.queue:
+                reward -= NO_QUEUE
+
             self.previous_killed_unit_score = killed_unit_score
             self.previous_killed_building_score = killed_building_score
             self.marines = marines
+            self.idle_marines = idle_marines
+            self.idle_scvs = idle_scvs
+            self.queue = queue
 
         return reward
 
     def step(self, obs):
         super(TerranAgent, self).step(obs)
+
         state = self.get_state(obs)
+        predicted = self.qnetwork.predict([state]).flatten()
 
-        reward = self.customReward(obs, state)
-        print(reward)
+        action = np.argmax(predicted)
+        legal_actions = self.getActions()
 
-        action = self.qnetwork.getAction(state)
-        if self.previous_action is not None:
-            self.qnetwork.learn(self.previous_state,
-                                self.previous_action,
-                                'terminal' if obs.last() else state,
-                                reward
-                                )
+        for i in range(len(legal_actions)):
+            print('Chances: ', legal_actions[i], predicted[i])
+
+        self.steps_to_update_target_model += 1
+
         if self.epsilon > random.random():
-            action = random.choice(self.actions)
+            action = random.randint(0, len(legal_actions) - 1)
 
+        if self.previous_action is not None:
+            reward = self.customReward(obs, state, legal_actions[self.previous_action], self.previous_state)
+            self.replay_memory.append([self.previous_state, self.previous_action, reward, state])
+
+            if self.steps_to_update_target_model % 4 == 0:
+                self.qnetwork.learn(self.replay_memory)
+            print('Reward: ', reward, ' Action: ', legal_actions[action], )
         self.previous_state = state
         self.previous_action = action
-        print(action)
-        return getattr(self, action)(obs)
+        if self.steps_to_update_target_model >= 100:
+            print('Copying main network weights to the target network weights')
+            self.qnetwork.update_target()
+            self.steps_to_update_target_model = 0
+        return getattr(self, legal_actions[action])(obs)
 
 
 class RandomAgent(Agent):
     def step(self, obs):
         super(RandomAgent, self).step(obs)
-        action = random.choice(self.actions)
+        action = random.choice(self.getActions())
         return getattr(self, action)(obs)
 
 
