@@ -14,10 +14,11 @@ from tensorflow.keras.models import Sequential, model_from_json
 from tensorflow.keras.layers import Dense, Dropout, Activation, Convolution2D, Flatten
 from tensorflow.keras.optimizers import SGD, Adam
 
-BUILD_UNIT = 0.1
+BUILD_UNIT = 0.2
 SENT_ATTACK = 0.2
 IDLE_FREED = 0.05
-NO_QUEUE = 0
+NO_QUEUE = -0.01
+QUEUED = 0.1
 
 
 class QNetwork():
@@ -67,7 +68,7 @@ class QNetwork():
 
     def learn(self, replay_memory):
 
-        learning_rate = self.alpha
+        learning_rate = 0.7
         discount_factor = self.gamma
         MIN_REPLAY_SIZE = 200
 
@@ -117,27 +118,80 @@ class Agent(base_agent.BaseAgent):
     def getActions(self):
         return self.actions
 
-    def get_legal_actions(self, obs):
+    def get_legal_actions(self, state):
         legal_actions = [1, 0, 0, 0, 0, 0]
+
+        legal_action_numbers = [0]
         for i in self.actions:
             if i == "harvest_minerals":
-                idle_scvs = [scv for scv in self.get_my_units_by_type(obs, units.Terran.SCV) if scv.order_length == 0]
-                if len(idle_scvs) > 0:
+                if state[0] > 0:
                     legal_actions[1] = 1
+                    legal_action_numbers.append(1)
             if i == "build_supply_depot":
-                if len(self.get_my_completed_units_by_type(obs, units.Terran.SupplyDepot)) < 5:
+                if state[2] < 5:
                     legal_actions[2] = 1
+                    legal_action_numbers.append(2)
             if i == "build_barracks":
-                if len(self.get_my_completed_units_by_type(obs, units.Terran.SupplyDepot)) > 0:
+                if state[3] > 0 and state[4] < 9:
                     legal_actions[3] = 1
+                    legal_action_numbers.append(3)
             if i == "train_marine":
-                if len(self.get_my_completed_units_by_type(obs, units.Terran.Barracks)) > 0:
+                if state[5] > 0:
                     legal_actions[4] = 1
+                    legal_action_numbers.append(4)
             if i == "attack":
-                if len([marine for marine in self.get_my_units_by_type(obs, units.Terran.Marine) if
-                        marine.order_length == 0]):
+                if state[1]:
                     legal_actions[5] = 1
-        return legal_actions
+                    legal_action_numbers.append(5)
+        return legal_actions, legal_action_numbers
+
+    def get_state(self, obs):
+        scvs = self.get_my_units_by_type(obs, units.Terran.SCV)
+        idle_scvs = [scv for scv in scvs if scv.order_length == 0]
+        supply_depots = self.get_my_units_by_type(obs, units.Terran.SupplyDepot)
+        completed_supply_depots = self.get_my_completed_units_by_type(
+            obs, units.Terran.SupplyDepot)
+        barrackses = self.get_my_units_by_type(obs, units.Terran.Barracks)
+        completed_barrackses = self.get_my_completed_units_by_type(
+            obs, units.Terran.Barracks)
+        marines = self.get_my_units_by_type(obs, units.Terran.Marine)
+        idle_marines = [marine for marine in marines if marine.order_length == 0]
+
+        queued_marines = np.sum([barracks.order_length for barracks in completed_barrackses])
+
+        free_supply = (obs.observation.player.food_cap -
+                       obs.observation.player.food_used)
+        can_afford_supply_depot = obs.observation.player.minerals >= 100
+        can_afford_barracks = obs.observation.player.minerals >= 150
+        can_afford_marine = obs.observation.player.minerals >= 50
+
+        print(
+            'Idle SCVs: ', len(idle_scvs),
+            ' Idle Marines: ', len(idle_marines),
+            ' Depots: ', len(supply_depots),
+            ' Completed Depots: ', len(completed_supply_depots),
+            ' Barracks: ', len(barrackses),
+            ' Completed Barracks: ', len(completed_barrackses),
+            ' Marines: ', len(marines),
+            ' Queued Marines: ', queued_marines,
+            ' Free supply: ', free_supply,
+            ' Affort Supply: ', can_afford_supply_depot,
+            ' Afford Barracks: ', can_afford_barracks,
+            ' Affort Marine: ', can_afford_marine,
+        )
+
+        return (len(idle_scvs),
+                len(idle_marines),
+                len(supply_depots),
+                len(completed_supply_depots),
+                len(barrackses),
+                len(completed_barrackses),
+                len(marines),
+                queued_marines,
+                free_supply,
+                can_afford_supply_depot,
+                can_afford_barracks,
+                can_afford_marine)
 
     def get_my_units_by_type(self, obs, unit_type):
         return [unit for unit in obs.observation.raw_units
@@ -294,53 +348,6 @@ class TerranAgent(Agent):
         self.previous_state = None
         self.previous_action = None
 
-    def get_state(self, obs):
-        scvs = self.get_my_units_by_type(obs, units.Terran.SCV)
-        idle_scvs = [scv for scv in scvs if scv.order_length == 0]
-        supply_depots = self.get_my_units_by_type(obs, units.Terran.SupplyDepot)
-        completed_supply_depots = self.get_my_completed_units_by_type(
-            obs, units.Terran.SupplyDepot)
-        barrackses = self.get_my_units_by_type(obs, units.Terran.Barracks)
-        completed_barrackses = self.get_my_completed_units_by_type(
-            obs, units.Terran.Barracks)
-        marines = self.get_my_units_by_type(obs, units.Terran.Marine)
-        idle_marines = [marine for marine in marines if marine.order_length == 0]
-
-        queued_marines = np.sum([barracks.order_length for barracks in completed_barrackses])
-
-        free_supply = (obs.observation.player.food_cap -
-                       obs.observation.player.food_used)
-        can_afford_supply_depot = obs.observation.player.minerals >= 100
-        can_afford_barracks = obs.observation.player.minerals >= 150
-        can_afford_marine = obs.observation.player.minerals >= 50
-
-        print(
-            'Idle SCVs: ', len(idle_scvs),
-            ' Idle Marines: ', len(idle_marines),
-            ' Depots: ', len(supply_depots),
-            ' Completed Depots: ', len(completed_supply_depots),
-            ' Barracks: ', len(barrackses),
-            ' Completed Barracks: ', len(completed_barrackses),
-            ' Marines: ', len(marines),
-            ' Queued Marines: ', queued_marines,
-            ' Free supply: ', free_supply,
-            ' Affort Supply: ', can_afford_supply_depot,
-            ' Afford Barracks: ', can_afford_barracks,
-            ' Affort Marine: ', can_afford_marine,
-        )
-
-        return (len(idle_scvs),
-                len(idle_marines),
-                len(supply_depots),
-                len(completed_supply_depots),
-                len(barrackses),
-                len(completed_barrackses),
-                len(marines),
-                queued_marines,
-                free_supply,
-                can_afford_supply_depot,
-                can_afford_barracks,
-                can_afford_marine)
 
     def customReward(self, obs, state, previous_action, previous_state):
         killed_unit_score = obs.observation['score_cumulative'][5]
@@ -372,7 +379,7 @@ class TerranAgent(Agent):
                 reward += NO_QUEUE
 
             if barrackses > queue > self.queue:
-                reward -= NO_QUEUE
+                reward += QUEUED
 
             self.previous_killed_unit_score = killed_unit_score
             self.previous_killed_building_score = killed_building_score
@@ -388,6 +395,12 @@ class TerranAgent(Agent):
 
         state = self.get_state(obs)
         predicted = self.qnetwork.predict([state]).flatten()
+        predicted = predicted+1
+
+        legal_action_predictions, legal_action_numbers = self.get_legal_actions(state)
+
+        predicted = legal_action_predictions * predicted
+        predicted = predicted-1
 
         action = np.argmax(predicted)
         legal_actions = self.getActions()
@@ -398,7 +411,7 @@ class TerranAgent(Agent):
         self.steps_to_update_target_model += 1
 
         if self.epsilon > random.random():
-            action = random.randint(0, len(legal_actions) - 1)
+            action = random.choice(legal_action_numbers)
 
         if self.previous_action is not None:
             reward = self.customReward(obs, state, legal_actions[self.previous_action], self.previous_state)
@@ -419,8 +432,11 @@ class TerranAgent(Agent):
 class RandomAgent(Agent):
     def step(self, obs):
         super(RandomAgent, self).step(obs)
-        action = random.choice(self.getActions())
-        return getattr(self, action)(obs)
+        state = self.get_state(obs)
+        legal_actions = self.getActions()
+        legal_action_predictions, legal_action_numbers = self.get_legal_actions(state)
+        action = random.choice(legal_action_numbers)
+        return getattr(self, legal_actions[action])(obs)
 
 
 if __name__ == "__main__":
