@@ -14,10 +14,13 @@ from tensorflow.keras.models import Sequential, model_from_json
 from tensorflow.keras.layers import Dense, Dropout, Activation, Convolution2D, Flatten
 from tensorflow.keras.optimizers import SGD, Adam
 
+from s2clientprotocol import common_pb2 as sc_common
+from s2clientprotocol import sc2api_pb2 as sc_pb
+
 BUILD_UNIT = 0.2
-SENT_ATTACK = 0.2
+SENT_ATTACK = 0.4
 IDLE_FREED = 0.05
-NO_QUEUE = -0.01
+NO_QUEUE = 0
 QUEUED = 0.1
 
 
@@ -26,16 +29,14 @@ class QNetwork():
     def __init__(self,
                  legal_actions,
                  state_size,
-                 gamma=0.6,
-                 alpha=0.01,
-                 train=1,
+                 gamma=0.9,
+                 alpha=0.001,
                  **args):
 
         self.state_size = state_size
         self.legal_actions = legal_actions
         self.gamma = gamma
         self.alpha = alpha
-        self.train = train
         self.lastAction = None
 
         sgd = SGD(lr=self.alpha)
@@ -106,6 +107,8 @@ class QNetwork():
     def predict(self, state):
         return self.network.predict(state)
 
+    def save(self):
+        self.network.save_weights('weights.h5')
 
 class Agent(base_agent.BaseAgent):
     actions = ["do_nothing",
@@ -315,6 +318,7 @@ class Agent(base_agent.BaseAgent):
 class TerranAgent(Agent):
     def __init__(self):
         super(TerranAgent, self).__init__()
+        self.train = 0
 
         self.replay_memory = deque(maxlen=50_000)
         self.previous_killed_unit_score = 0
@@ -347,6 +351,7 @@ class TerranAgent(Agent):
         self.base_top_left = None
         self.previous_state = None
         self.previous_action = None
+        self.qnetwork.save()
 
 
     def customReward(self, obs, state, previous_action, previous_state):
@@ -410,22 +415,28 @@ class TerranAgent(Agent):
 
         self.steps_to_update_target_model += 1
 
-        if self.epsilon > random.random():
-            action = random.choice(legal_action_numbers)
+        if self.train == 0:
+            if 0.2 > random.random():
+                action = random.choice(legal_action_numbers)
 
-        if self.previous_action is not None:
-            reward = self.customReward(obs, state, legal_actions[self.previous_action], self.previous_state)
-            self.replay_memory.append([self.previous_state, self.previous_action, reward, state])
+        if self.train == 1:
 
-            if self.steps_to_update_target_model % 4 == 0:
-                self.qnetwork.learn(self.replay_memory)
-            print('Reward: ', reward, ' Action: ', legal_actions[action], )
-        self.previous_state = state
-        self.previous_action = action
-        if self.steps_to_update_target_model >= 100:
-            print('Copying main network weights to the target network weights')
-            self.qnetwork.update_target()
-            self.steps_to_update_target_model = 0
+            if self.epsilon > random.random():
+                action = random.choice(legal_action_numbers)
+
+            if self.previous_action is not None:
+                reward = self.customReward(obs, state, legal_actions[self.previous_action], self.previous_state)
+                self.replay_memory.append([self.previous_state, self.previous_action, reward, state])
+
+                if self.steps_to_update_target_model % 4 == 0:
+                    self.qnetwork.learn(self.replay_memory)
+                print('Reward: ', reward, ' Action: ', legal_actions[action], )
+            self.previous_state = state
+            self.previous_action = action
+            if self.steps_to_update_target_model >= 100:
+                print('Copying main network weights to the target network weights')
+                self.qnetwork.update_target()
+                self.steps_to_update_target_model = 0
         return getattr(self, legal_actions[action])(obs)
 
 
@@ -449,7 +460,7 @@ if __name__ == "__main__":
         with sc2_env.SC2Env(
                 map_name="Simple64",
                 players=[sc2_env.Agent(sc2_env.Race.terran),
-                         sc2_env.Agent(sc2_env.Race.terran)],
+                         sc2_env.Bot(sc_common.Terran, sc_pb.Easy, sc_pb.RandomBuild)],
                 agent_interface_format=features.AgentInterfaceFormat(
                     action_space=actions.ActionSpace.RAW,
                     use_raw_units=True,
@@ -457,6 +468,6 @@ if __name__ == "__main__":
                 ),
                 step_mul=48,
                 disable_fog=True) as env:
-            run_loop.run_loop([agent1, agent2], env, max_episodes=1000)
+            run_loop.run_loop([agent1], env, max_episodes=1000)
     except KeyboardInterrupt:
         pass
