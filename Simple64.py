@@ -1,7 +1,5 @@
 from collections import deque
 
-from pysc2.env import sc2_env, run_loop
-import torch
 from pysc2.agents import base_agent
 from pysc2.env import sc2_env, run_loop
 import numpy as np
@@ -13,6 +11,7 @@ import os
 from tensorflow.keras.models import Sequential, model_from_json
 from tensorflow.keras.layers import Dense, Dropout, Activation, Convolution2D, Flatten
 from tensorflow.keras.optimizers import SGD, Adam
+from tensorflow.keras.layers import LeakyReLU
 
 from s2clientprotocol import common_pb2 as sc_common
 from s2clientprotocol import sc2api_pb2 as sc_pb
@@ -30,7 +29,7 @@ class QNetwork():
                  legal_actions,
                  state_size,
                  gamma=0.9,
-                 alpha=0.001,
+                 alpha=0.0005,
                  **args):
 
         self.state_size = state_size
@@ -339,7 +338,7 @@ class TerranAgent(Agent):
 
     def reset(self):
         super(TerranAgent, self).reset()
-        self.epsilon = self.epsilon * 0.95
+        self.epsilon = self.epsilon * 0.98
         self.new_game()
 
     def new_game(self):
@@ -456,6 +455,23 @@ if __name__ == "__main__":
 
     agent1 = TerranAgent()
     agent2 = RandomAgent()
+
+    # try:
+    #     with sc2_env.SC2Env(
+    #             map_name="Simple64",
+    #             players=[sc2_env.Agent(sc2_env.Race.terran),
+    #                      sc2_env.Agent(sc2_env.Race.terran)],
+    #             agent_interface_format=features.AgentInterfaceFormat(
+    #                 action_space=actions.ActionSpace.RAW,
+    #                 use_raw_units=True,
+    #                 raw_resolution=64,
+    #             ),
+    #             step_mul=48,
+    #             disable_fog=True) as env:
+    #         run_loop.run_loop([agent1,agent2], env, max_episodes=1000)
+    # except KeyboardInterrupt:
+    #     pass
+
     try:
         with sc2_env.SC2Env(
                 map_name="Simple64",
