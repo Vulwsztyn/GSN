@@ -16,6 +16,10 @@ from tensorflow.keras.layers import LeakyReLU
 from s2clientprotocol import common_pb2 as sc_common
 from s2clientprotocol import sc2api_pb2 as sc_pb
 
+import pickle
+
+reward_list = []
+
 BUILD_UNIT = 0.2
 SENT_ATTACK = 0.4
 IDLE_FREED = 0.05
@@ -317,7 +321,7 @@ class Agent(base_agent.BaseAgent):
 class TerranAgent(Agent):
     def __init__(self):
         super(TerranAgent, self).__init__()
-        self.train = 0
+        self.train = 1
 
         self.replay_memory = deque(maxlen=50_000)
         self.previous_killed_unit_score = 0
@@ -327,6 +331,8 @@ class TerranAgent(Agent):
         self.idle_scvs = 0
         self.queue = 0
         self.steps_to_update_target_model = 0
+
+        self.reward_list = []
 
         self.previous_state = None
         self.previous_action = None
@@ -338,6 +344,11 @@ class TerranAgent(Agent):
 
     def reset(self):
         super(TerranAgent, self).reset()
+        global reward_list
+        reward_list.append(np.mean(self.reward_list))
+        pickle.dump(reward_list, open("rewards.p", "wb"))
+        self.reward_list = []
+
         self.epsilon = self.epsilon * 0.98
         self.new_game()
 
@@ -425,6 +436,7 @@ class TerranAgent(Agent):
 
             if self.previous_action is not None:
                 reward = self.customReward(obs, state, legal_actions[self.previous_action], self.previous_state)
+                self.reward_list.append(reward)
                 self.replay_memory.append([self.previous_state, self.previous_action, reward, state])
 
                 if self.steps_to_update_target_model % 4 == 0:
@@ -456,27 +468,11 @@ if __name__ == "__main__":
     agent1 = TerranAgent()
     agent2 = RandomAgent()
 
-    # try:
-    #     with sc2_env.SC2Env(
-    #             map_name="Simple64",
-    #             players=[sc2_env.Agent(sc2_env.Race.terran),
-    #                      sc2_env.Agent(sc2_env.Race.terran)],
-    #             agent_interface_format=features.AgentInterfaceFormat(
-    #                 action_space=actions.ActionSpace.RAW,
-    #                 use_raw_units=True,
-    #                 raw_resolution=64,
-    #             ),
-    #             step_mul=48,
-    #             disable_fog=True) as env:
-    #         run_loop.run_loop([agent1,agent2], env, max_episodes=1000)
-    # except KeyboardInterrupt:
-    #     pass
-
     try:
         with sc2_env.SC2Env(
                 map_name="Simple64",
                 players=[sc2_env.Agent(sc2_env.Race.terran),
-                         sc2_env.Bot(sc_common.Terran, sc_pb.Easy, sc_pb.RandomBuild)],
+                         sc2_env.Agent(sc2_env.Race.terran)],
                 agent_interface_format=features.AgentInterfaceFormat(
                     action_space=actions.ActionSpace.RAW,
                     use_raw_units=True,
@@ -484,6 +480,22 @@ if __name__ == "__main__":
                 ),
                 step_mul=48,
                 disable_fog=True) as env:
-            run_loop.run_loop([agent1], env, max_episodes=1000)
+            run_loop.run_loop([agent1,agent2], env, max_episodes=1000)
     except KeyboardInterrupt:
         pass
+
+    # try:
+    #     with sc2_env.SC2Env(
+    #             map_name="Simple64",
+    #             players=[sc2_env.Agent(sc2_env.Race.terran),
+    #                      sc2_env.Bot(sc_common.Terran, sc_pb.Easy, sc_pb.RandomBuild)],
+    #             agent_interface_format=features.AgentInterfaceFormat(
+    #                 action_space=actions.ActionSpace.RAW,
+    #                 use_raw_units=True,
+    #                 raw_resolution=64,
+    #             ),
+    #             step_mul=48,
+    #             disable_fog=True) as env:
+    #         run_loop.run_loop([agent1], env, max_episodes=1000)
+    # except KeyboardInterrupt:
+    #     pass
